@@ -1,7 +1,8 @@
 use color_eyre::Result;
-use std::io;
+use rand::Rng;
+use std::{io, sync::mpsc, thread, time::Duration};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -15,15 +16,57 @@ use ratatui::{
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let terminal = ratatui::init();
-    let result = App::new().run(terminal);
+    let app = App::new();
+
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
+
+    let tx_to_input_events = event_tx.clone();
+    thread::spawn(move || {
+        handle_input_events(tx_to_input_events);
+    });
+    let tx_to_background_events = event_tx.clone();
+    thread::spawn(move || {
+        run_background_thread(tx_to_background_events);
+    });
+    let result = app.run(terminal, event_rx);
     ratatui::restore();
     result
+}
+
+enum Event {
+    Input(crossterm::event::KeyEvent),
+    BTCPrice(String),   
+}
+
+fn handle_input_events(tx: mpsc::Sender<Event>) {
+    loop {
+        match crossterm::event::read().unwrap() {
+            crossterm::event::Event::Key(key_event) => tx.send(Event::Input(key_event)).unwrap(),
+            _ => {}
+        }
+    }
+}
+
+fn get_btc_price() -> Option<String> {
+    let num = rand::rng().random_range(0..100);
+    let res = 100000 + 1123 * num;
+    Some(res.to_string())
+}
+
+fn run_background_thread(tx: mpsc::Sender<Event>) {
+    let mut btc_price = get_btc_price();
+    loop {
+        thread::sleep(Duration::from_millis(200));
+        btc_price = get_btc_price();
+        tx.send(Event::BTCPrice(btc_price.unwrap())).unwrap();
+    }
 }
 
 /// The main application which holds the state and logic of the application.
 #[derive(Debug, Default)]
 pub struct App {
     counter: u8,
+    btc_price: String,
     running: bool,
 }
 
@@ -34,11 +77,11 @@ impl App {
     }
 
     /// Run the application's main loop.
-    pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+    pub fn run(mut self, mut terminal: DefaultTerminal, rx: mpsc::Receiver<Event>) -> Result<()> {
         self.running = true;
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
-            self.handle_crossterm_events()?;
+            self.handle_crossterm_events(&rx)?;
         }
         Ok(())
     }
@@ -47,12 +90,14 @@ impl App {
     ///
     /// If your application needs to perform work in between handling events, you can use the
     /// [`event::poll`] function to check if there are any events available with a timeout.
-    fn handle_crossterm_events(&mut self) -> Result<()> {
-        match event::read()? {
+    fn handle_crossterm_events(&mut self, rx: &mpsc::Receiver<Event>) -> Result<()> {
+        match rx.recv().unwrap() {
             // it's important to check KeyEventKind::Press to avoid handling key release events
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
-            Event::Mouse(_) => {}
-            Event::Resize(_, _) => {}
+            // Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
+            // Event::Mouse(_) => {}
+            // Event::Resize(_, _) => {}
+            Event::Input(key_event) => self.on_key_event(key_event),
+            Event::BTCPrice(btc_price) => self.btc_price = btc_price,
             _ => {}
         }
         Ok(())
@@ -106,7 +151,7 @@ impl Widget for &App {
 
         let counter_text = Text::from(vec![Line::from(vec![
             "Value: ".into(),
-            self.counter.to_string().yellow(),
+            self.btc_price.clone().yellow(),
         ])]);
 
         Paragraph::new(counter_text)
