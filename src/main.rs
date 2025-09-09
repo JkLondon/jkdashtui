@@ -1,8 +1,8 @@
 use color_eyre::Result;
 use rand::Rng;
-use std::{io, sync::mpsc, thread, time::Duration};
+use std::{sync::mpsc, thread, time::Duration};
 
-use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -33,7 +33,7 @@ fn main() -> color_eyre::Result<()> {
     result
 }
 
-enum Event {
+pub enum Event {
     Input(crossterm::event::KeyEvent),
     BTCPrice(String),   
 }
@@ -54,10 +54,9 @@ fn get_btc_price() -> Option<String> {
 }
 
 fn run_background_thread(tx: mpsc::Sender<Event>) {
-    let mut btc_price = get_btc_price();
     loop {
         thread::sleep(Duration::from_millis(200));
-        btc_price = get_btc_price();
+        let btc_price = get_btc_price();
         tx.send(Event::BTCPrice(btc_price.unwrap())).unwrap();
     }
 }
@@ -98,7 +97,6 @@ impl App {
             // Event::Resize(_, _) => {}
             Event::Input(key_event) => self.on_key_event(key_event),
             Event::BTCPrice(btc_price) => self.btc_price = btc_price,
-            _ => {}
         }
         Ok(())
     }
