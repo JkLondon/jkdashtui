@@ -5,7 +5,7 @@ use std::{sync::mpsc, thread, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::Stylize,
     symbols::border,
     text::{Line, Text},
@@ -24,9 +24,13 @@ fn main() -> color_eyre::Result<()> {
     thread::spawn(move || {
         handle_input_events(tx_to_input_events);
     });
-    let tx_to_background_events = event_tx.clone();
+    let tx_to_btc_price_events = event_tx.clone();
     thread::spawn(move || {
-        run_background_thread(tx_to_background_events);
+        run_btc_price_thread(tx_to_btc_price_events);
+    });
+    let tx_to_weather_events = event_tx.clone();
+    thread::spawn(move || {
+        run_weather_thread(tx_to_weather_events);
     });
     let result = app.run(terminal, event_rx);
     ratatui::restore();
@@ -35,7 +39,8 @@ fn main() -> color_eyre::Result<()> {
 
 pub enum Event {
     Input(crossterm::event::KeyEvent),
-    BTCPrice(String),   
+    BTCPrice(String),
+    Weather(String),
 }
 
 fn handle_input_events(tx: mpsc::Sender<Event>) {
@@ -53,11 +58,25 @@ fn get_btc_price() -> Option<String> {
     Some(res.to_string())
 }
 
-fn run_background_thread(tx: mpsc::Sender<Event>) {
+fn get_weather() -> Option<String> {
+    let weather_variants = ["Sunny", "Rain", "Clouds", "Snow", "Storm"];
+    let num = rand::rng().random_range(0..5);
+    Some(weather_variants[num].to_string())
+}
+
+fn run_btc_price_thread(tx: mpsc::Sender<Event>) {
     loop {
         thread::sleep(Duration::from_millis(200));
         let btc_price = get_btc_price();
         tx.send(Event::BTCPrice(btc_price.unwrap())).unwrap();
+    }
+}
+
+fn run_weather_thread(tx: mpsc::Sender<Event>) {
+    loop {
+        thread::sleep(Duration::from_millis(1000));
+        let weather = get_weather();
+        tx.send(Event::Weather(weather.unwrap())).unwrap();
     }
 }
 
@@ -66,6 +85,7 @@ fn run_background_thread(tx: mpsc::Sender<Event>) {
 pub struct App {
     counter: u8,
     btc_price: String,
+    weather: String,
     running: bool,
 }
 
@@ -97,6 +117,7 @@ impl App {
             // Event::Resize(_, _) => {}
             Event::Input(key_event) => self.on_key_event(key_event),
             Event::BTCPrice(btc_price) => self.btc_price = btc_price,
+            Event::Weather(weather) => self.weather = weather,
         }
         Ok(())
     }
@@ -133,7 +154,7 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from(" Counter App Tutorial ".bold());
+        let title = Line::from(" JkDashTUI ".bold());
         let instructions = Line::from(vec![
             " Decrement ".into(),
             "<Left>".blue().bold(),
@@ -142,20 +163,51 @@ impl Widget for &App {
             " Quit ".into(),
             "<Q> ".blue().bold(),
         ]);
-        let block = Block::bordered()
-            .title(title.centered())
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK);
 
-        let counter_text = Text::from(vec![Line::from(vec![
-            "Value: ".into(),
+        let bg_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![
+                Constraint::Percentage(10),
+                Constraint::Percentage(80),
+                Constraint::Percentage(10),
+            ])
+            .split(area);
+        let content_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(bg_layout[1]);
+
+        Block::bordered()
+            .title(title.centered())
+            .border_set(border::EMPTY).render(bg_layout[0], buf);
+        Block::bordered()
+            .title_bottom(instructions.centered())
+            .border_set(border::EMPTY).render(bg_layout[2], buf);
+        let block_btc_price = Block::bordered()
+            .border_set(border::THICK);
+        let block_weather = Block::bordered()
+            .border_set(border::THICK);
+        let btc_price_text = Text::from(vec![Line::from(vec![
+            "BTC Price: ".into(),
             self.btc_price.clone().yellow(),
         ])]);
 
-        Paragraph::new(counter_text)
+        let weather_text = Text::from(vec![Line::from(vec![
+            "Weather is: ".into(),
+            self.weather.clone().yellow(),
+        ])]);
+        
+        Paragraph::new(btc_price_text)
             .centered()
-            .block(block)
-            .render(area, buf);
+            .block(block_btc_price)
+            .render(content_layout[0], buf);
+        Paragraph::new(weather_text)
+            .centered()
+            .block(block_weather)
+            .render(content_layout[1], buf);
     }
 }
 
