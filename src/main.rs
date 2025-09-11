@@ -1,8 +1,10 @@
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
+use tokio::task;
+use tokio::time::{self, Duration};
 use color_eyre::Result;
 use rand::Rng;
-use std::{sync::mpsc, thread, time::Duration};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{read, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -13,28 +15,21 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 
-fn main() -> color_eyre::Result<()> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let terminal = ratatui::init();
     let app = App::new();
 
-    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    let (event_tx, event_rx) = unbounded_channel::<Event>();
 
-    let tx_to_input_events = event_tx.clone();
-    thread::spawn(move || {
-        handle_input_events(tx_to_input_events);
-    });
-    let tx_to_btc_price_events = event_tx.clone();
-    thread::spawn(move || {
-        run_btc_price_thread(tx_to_btc_price_events);
-    });
-    let tx_to_weather_events = event_tx.clone();
-    thread::spawn(move || {
-        run_weather_thread(tx_to_weather_events);
-    });
-    let result = app.run(terminal, event_rx);
+    tokio::spawn({ let tx = event_tx.clone(); async move { input_events_task(tx).await}});
+    tokio::spawn({ let tx = event_tx.clone(); async move { run_btc_price_task(tx).await}});
+    tokio::spawn({ let tx = event_tx.clone(); async move { run_weather_task(tx).await}});
+
+    app.run(terminal, event_rx).await?;
     ratatui::restore();
-    result
+    Ok(())
 }
 
 pub enum Event {
@@ -43,11 +38,16 @@ pub enum Event {
     Weather(String),
 }
 
-fn handle_input_events(tx: mpsc::Sender<Event>) {
+async fn input_events_task(tx: UnboundedSender<Event>) {
     loop {
-        match crossterm::event::read().unwrap() {
-            crossterm::event::Event::Key(key_event) => tx.send(Event::Input(key_event)).unwrap(),
-            _ => {}
+        let ev = match task::spawn_blocking(|| read()).await {
+            Ok(Ok(e)) => e,
+            Ok(Err(_e)) => continue,
+            Err(_join_err) => break,
+        };
+
+        if let CtEvent::Key(key) = ev {
+            let _ = tx.send(Event::Input(key));
         }
     }
 }
@@ -64,19 +64,23 @@ fn get_weather() -> Option<String> {
     Some(weather_variants[num].to_string())
 }
 
-fn run_btc_price_thread(tx: mpsc::Sender<Event>) {
+async fn run_btc_price_task(tx: UnboundedSender<Event>) -> color_eyre::Result<()> {
+    let mut tick = time::interval(Duration::from_millis(200));
     loop {
-        thread::sleep(Duration::from_millis(200));
-        let btc_price = get_btc_price();
-        tx.send(Event::BTCPrice(btc_price.unwrap())).unwrap();
+        tick.tick().await;
+        if let Some(btc_price) = get_btc_price(){
+            tx.send(Event::BTCPrice(btc_price))?;
+        }
     }
 }
 
-fn run_weather_thread(tx: mpsc::Sender<Event>) {
+async fn run_weather_task(tx: UnboundedSender<Event>) -> color_eyre::Result<()> {
+    let mut tick = time::interval(Duration::from_millis(1000));
     loop {
-        thread::sleep(Duration::from_millis(1000));
-        let weather = get_weather();
-        tx.send(Event::Weather(weather.unwrap())).unwrap();
+        tick.tick().await;
+        if let Some(weather) = get_weather(){
+            tx.send(Event::Weather(weather))?;
+        }
     }
 }
 
@@ -96,11 +100,16 @@ impl App {
     }
 
     /// Run the application's main loop.
-    pub fn run(mut self, mut terminal: DefaultTerminal, rx: mpsc::Receiver<Event>) -> Result<()> {
+    pub async fn run(mut self, mut terminal: DefaultTerminal, mut rx: UnboundedReceiver<Event>) -> color_eyre::Result<()> {
         self.running = true;
         while self.running {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_crossterm_events(&rx)?;
+            if let Some(event) = rx.recv().await {
+                self.handle_event(event)?;
+                terminal.draw(|frame| self.draw(frame))?;
+            } else {
+                break;
+            }
+            
         }
         Ok(())
     }
@@ -109,8 +118,8 @@ impl App {
     ///
     /// If your application needs to perform work in between handling events, you can use the
     /// [`event::poll`] function to check if there are any events available with a timeout.
-    fn handle_crossterm_events(&mut self, rx: &mpsc::Receiver<Event>) -> Result<()> {
-        match rx.recv().unwrap() {
+    fn handle_event(&mut self, event: Event) -> Result<()> {
+        match event {
             // it's important to check KeyEventKind::Press to avoid handling key release events
             // Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
             // Event::Mouse(_) => {}
