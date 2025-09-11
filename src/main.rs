@@ -5,7 +5,6 @@ use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 use tokio::task;
 use tokio::time::{self, Duration};
 use color_eyre::Result;
-use rand::Rng;
 
 use crossterm::event::{read, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -29,12 +28,13 @@ async fn main() -> color_eyre::Result<()> {
     let terminal = ratatui::init();
     let app = App::new();
     let http_client = reqwest::Client::new();
-
+    let btc_clone = http_client.clone();
+    let weather_clone = http_client.clone();
     let (event_tx, event_rx) = unbounded_channel::<Event>();
 
     tokio::spawn({ let tx = event_tx.clone(); async move { input_events_task(tx).await}});
-    tokio::spawn({ let tx = event_tx.clone(); async move { run_btc_price_task(tx, &http_client).await}});
-    tokio::spawn({ let tx = event_tx.clone(); async move { run_weather_task(tx).await}});
+    tokio::spawn({ let tx = event_tx.clone(); async move { run_btc_price_task(tx, &btc_clone).await}});
+    tokio::spawn({ let tx = event_tx.clone(); async move { run_weather_task(tx, &weather_clone).await}});
 
     app.run(terminal, event_rx).await?;
     ratatui::restore();
@@ -73,10 +73,15 @@ async fn get_btc_price(client: &Client) -> color_eyre::Result<String> {
     Ok(price)
 }
 
-fn get_weather() -> Option<String> {
-    let weather_variants = ["Sunny", "Rain", "Clouds", "Snow", "Storm"];
-    let num = rand::rng().random_range(0..5);
-    Some(weather_variants[num].to_string())
+async fn get_weather(client: &Client) -> color_eyre::Result<String> {
+    let resp = client
+    .get("https://wttr.in/Gijon?format=4")
+    .send()
+    .await?
+    .text()
+    .await?;
+
+    Ok(resp)
 }
 
 async fn run_btc_price_task(tx: UnboundedSender<Event>, client: &Client) -> color_eyre::Result<()> {
@@ -91,14 +96,17 @@ async fn run_btc_price_task(tx: UnboundedSender<Event>, client: &Client) -> colo
     Ok(())
 }
 
-async fn run_weather_task(tx: UnboundedSender<Event>) -> color_eyre::Result<()> {
-    let mut tick = time::interval(Duration::from_millis(1000));
+async fn run_weather_task(tx: UnboundedSender<Event>, client: &Client) -> color_eyre::Result<()> {
+    let mut tick = time::interval(Duration::from_millis(5000));
     loop {
         tick.tick().await;
-        if let Some(weather) = get_weather(){
-            tx.send(Event::Weather(weather))?;
+
+        let weather = get_weather(client).await?;
+        if tx.send(Event::Weather(weather)).is_err() {
+            break;
         }
     }
+    Ok(())
 }
 
 /// The main application which holds the state and logic of the application.
@@ -182,11 +190,7 @@ impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let title = Line::from(" JkDashTUI ".bold());
         let instructions = Line::from(vec![
-            " Decrement ".into(),
-            "<Left>".blue().bold(),
-            " Increment ".into(),
-            "<Right>".blue().bold(),
-            " Quit ".into(),
+            "Quit ".into(),
             "<Q> ".blue().bold(),
         ]);
 
@@ -222,7 +226,7 @@ impl Widget for &App {
         ])]);
 
         let weather_text = Text::from(vec![Line::from(vec![
-            "Weather is: ".into(),
+            "Weather: ".into(),
             self.weather.clone().yellow(),
         ])]);
         
