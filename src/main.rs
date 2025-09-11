@@ -1,3 +1,6 @@
+use reqwest::Client;
+use serde::Deserialize;
+
 use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 use tokio::task;
 use tokio::time::{self, Duration};
@@ -15,16 +18,22 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 
+#[derive(Deserialize)]
+struct BinancePrice {
+    price: String
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let terminal = ratatui::init();
     let app = App::new();
+    let http_client = reqwest::Client::new();
 
     let (event_tx, event_rx) = unbounded_channel::<Event>();
 
     tokio::spawn({ let tx = event_tx.clone(); async move { input_events_task(tx).await}});
-    tokio::spawn({ let tx = event_tx.clone(); async move { run_btc_price_task(tx).await}});
+    tokio::spawn({ let tx = event_tx.clone(); async move { run_btc_price_task(tx, &http_client).await}});
     tokio::spawn({ let tx = event_tx.clone(); async move { run_weather_task(tx).await}});
 
     app.run(terminal, event_rx).await?;
@@ -52,10 +61,16 @@ async fn input_events_task(tx: UnboundedSender<Event>) {
     }
 }
 
-fn get_btc_price() -> Option<String> {
-    let num = rand::rng().random_range(0..100);
-    let res = 100000 + 1123 * num;
-    Some(res.to_string())
+async fn get_btc_price(client: &Client) -> color_eyre::Result<String> {
+    let bp: BinancePrice = client
+    .get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+    .send()
+    .await?
+    .json()
+    .await?;
+
+    let price = bp.price;
+    Ok(price)
 }
 
 fn get_weather() -> Option<String> {
@@ -64,14 +79,16 @@ fn get_weather() -> Option<String> {
     Some(weather_variants[num].to_string())
 }
 
-async fn run_btc_price_task(tx: UnboundedSender<Event>) -> color_eyre::Result<()> {
-    let mut tick = time::interval(Duration::from_millis(200));
+async fn run_btc_price_task(tx: UnboundedSender<Event>, client: &Client) -> color_eyre::Result<()> {
+    let mut tick = time::interval(Duration::from_millis(500));
     loop {
         tick.tick().await;
-        if let Some(btc_price) = get_btc_price(){
-            tx.send(Event::BTCPrice(btc_price))?;
+        let btc_price = get_btc_price(client).await?;
+        if tx.send(Event::BTCPrice(btc_price)).is_err() {
+            break;
         }
     }
+    Ok(())
 }
 
 async fn run_weather_task(tx: UnboundedSender<Event>) -> color_eyre::Result<()> {
